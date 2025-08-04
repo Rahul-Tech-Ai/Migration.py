@@ -1,0 +1,76 @@
+import os
+import json
+import zipfile
+import shutil
+from pathlib import Path
+
+def load_config(config_path='config.json'):
+    """Load pipeline configuration from a JSON file."""
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+def find_zip_files(input_folder, recursive=True):
+    """Discover all .zip files in the input folder (recursively if enabled)."""
+    folder = Path(input_folder)
+    return list(folder.rglob('*.zip')) if recursive else list(folder.glob('*.zip'))
+
+def extract_zip(zip_path, extract_root):
+    """Extract a ZIP archive into a folder named after the archive."""
+    output_dir = extract_root / zip_path.stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        zf.extractall(output_dir)
+    return output_dir
+
+def find_parquet_files(folder):
+    """Locate all files with a .parquet extension in the extracted folder."""
+    return list(folder.rglob('*.parquet'))
+
+def create_zip_file(zip_name, files, base_folder, output_folder):
+    """Compress specified files into a new ZIP, preserving relative paths."""
+    output_folder.mkdir(parents=True, exist_ok=True)
+    output_zip_path = output_folder / f"{zip_name}.zip"
+    with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_path in files:
+            arcname = file_path.relative_to(base_folder)
+            zf.write(file_path, arcname)
+    return output_zip_path
+
+def process_zip(zip_path, config):
+    input_folder = Path(config['input_folder'])
+    output_folder = Path(config['output_folder'])
+    temp_root = output_folder / 'temp_extracted'
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    # 1. Extract ZIP
+    extracted_dir = extract_zip(zip_path, temp_root)
+
+    # 2. Identify Parquet files
+    parquet_files = find_parquet_files(extracted_dir)
+
+    # 3. Select files to zip
+    if parquet_files:
+        files_to_zip = parquet_files
+        zip_suffix = '_parquet'
+    else:
+        files_to_zip = list(extracted_dir.rglob('*'))
+        zip_suffix = '_all'
+
+    # 4. Create new ZIP
+    zip_name = f"{zip_path.stem}{zip_suffix}"
+    output_zip = create_zip_file(zip_name, files_to_zip, extracted_dir, output_folder)
+    print(f"Created {output_zip}")
+
+    # 5. Cleanup
+    shutil.rmtree(temp_root)
+    return output_zip
+
+def main():
+    config = load_config()
+    zip_files = find_zip_files(config['input_folder'], config.get('recursive', True))
+    for zip_path in zip_files:
+        process_zip(zip_path, config)
+
+if __name__ == '__main__':
+    main()
+
