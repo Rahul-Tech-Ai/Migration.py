@@ -1,0 +1,72 @@
+import json
+import zipfile
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+
+def get_file_size(path: Path) -> int:
+    return path.stat().st_size
+
+
+def load_config(config_path='config.json') -> dict:
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def chunk_files_by_size(files, max_batch_size):
+    batches = []
+    current_batch = []
+    current_size = 0
+    for f in files:
+        size = get_file_size(f)
+        if current_batch and current_size + size > max_batch_size:
+            batches.append(current_batch)
+            current_batch = [f]
+            current_size = size
+        else:
+            current_batch.append(f)
+            current_size += size
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
+def process_batch(index, files, input_dir, output_dir):
+    zip_name = f"batch_{index}.zip"
+    zip_path = output_dir / zip_name
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            arc = f.relative_to(input_dir)
+            zf.write(f, arc)
+    return zip_name, [str(f) for f in files]
+
+
+def main():
+    cfg = load_config()
+    in_dir = Path(cfg['input_folder'])
+    out_dir = Path(cfg['output_folder'])
+    max_size = cfg.get('max_batch_size', 100 * 1024 * 1024)
+    workers = cfg.get('workers', 4)
+    recursive = cfg.get('recursive', False)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pattern = '**/*.csv' if recursive else '*.csv'
+    all_files = list(in_dir.glob(pattern))
+
+    batches = chunk_files_by_size(all_files, max_size)
+    metadata = {}
+
+    def work(item):
+        idx, files = item
+        name, flist = process_batch(idx, files, in_dir, out_dir)
+        metadata[name] = flist
+
+    with ThreadPoolExecutor(max_workers=workers) as exe:
+        exe.map(work, enumerate(batches))
+
+    with open(out_dir / 'metadata.json', 'w') as mf:
+        json.dump(metadata, mf, indent=2)
+    print(f"Generated {len(batches)} zip(s) and metadata.json in {out_dir}")
+
+if __name__ == '__main__':
+    main()
