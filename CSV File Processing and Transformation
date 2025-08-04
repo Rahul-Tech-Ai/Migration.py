@@ -1,0 +1,43 @@
+import sys
+import pandas as pd
+import json
+
+
+def transform_value(val):
+    val = val.replace(' ', '_')
+    val = val.replace('Level_III', 'L3')
+    if not val.startswith('AFS_'):
+        val = 'AFS_' + val
+    return val
+
+
+def process_csv(input_csv, output_csv, mapping_json):
+    df = pd.read_csv(input_csv)
+    if df.shape[1] < 2:
+        raise ValueError("Expected at least 2 columns in input CSV")
+
+    original_vals = df.iloc[:,1].astype(str).tolist()
+    transformed_vals = [transform_value(v) for v in original_vals]
+    df.iloc[:,1] = transformed_vals
+
+    df.dropna(inplace=True)
+
+    df.to_csv(output_csv, index=False)
+
+    mapping = dict(zip(original_vals, transformed_vals))
+    with open(mapping_json, 'w') as f:
+        json.dump(mapping, f, indent=2)
+
+    print(f"Transformed CSV saved to {output_csv}")
+    print(f"Mapping JSON saved to {mapping_json}")
+
+
+def main():
+    if len(sys.argv) != 4:
+        print("Usage: transform_csv.py <input.csv> <output.csv> <mapping.json>")
+        sys.exit(1)
+    process_csv(sys.argv[1], sys.argv[2], sys.argv[3])
+
+
+if __name__ == '__main__':
+    main()
