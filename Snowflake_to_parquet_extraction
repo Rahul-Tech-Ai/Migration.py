@@ -1,0 +1,82 @@
+import argparse
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+from snowflake.connector import connect
+
+
+def extract_and_save_chunk(conn_params: dict, table: str, offset: int, limit: int, output_dir: Path) -> None:
+    """
+    Fetches a chunk of rows and writes to Parquet.
+    """
+    query = f"SELECT * FROM {table} LIMIT {limit} OFFSET {offset}"
+    conn = connect(**conn_params)
+    try:
+        df = pd.read_sql(query, conn)
+        filename = output_dir / f"{table}_offset_{offset}.parquet"
+        df.to_parquet(filename, index=False)
+        logging.info(f"Chunk at offset {offset} saved ({len(df)} rows)")
+    finally:
+        conn.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Paginated Snowflake data extraction to Parquet")
+    parser.add_argument("--account", required=True)
+    parser.add_argument("--user", required=True)
+    parser.add_argument("--password", required=True)
+    parser.add_argument("--database", required=True)
+    parser.add_argument("--schema", required=True)
+    parser.add_argument("--warehouse", required=True)
+    parser.add_argument("--table", required=True, help="Full table name (e.g. SCHEMA.TABLE)")
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--page-size", type=int, default=5000)
+    parser.add_argument("--threads", type=int, default=10)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build connection parameters
+    conn_params = {
+        'account': args.account,
+        'user': args.user,
+        'password': args.password,
+        'database': args.database,
+        'schema': args.schema,
+        'warehouse': args.warehouse,
+    }
+
+    # Count total rows
+    with connect(**conn_params) as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {args.table}")
+        total_rows = cursor.fetchone()[0]
+        logging.info(f"Total rows in {args.table}: {total_rows}")
+
+    # Pagination offsets
+    offsets = list(range(0, total_rows, args.page_size))
+
+    start_time = time.time()
+    # Multithreaded extraction
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        futures = []
+        for offset in offsets:
+            futures.append(
+                executor.submit(
+                    extract_and_save_chunk,
+                    conn_params, args.table, offset, args.page_size, args.output_dir
+                )
+            )
+        for future in as_completed(futures):
+            future.result()
+
+    duration = time.time() - start_time
+    logging.info(f"Finished extraction in {duration:.2f} seconds.")
+
+
+if __name__ == "__main__":
+    main()
