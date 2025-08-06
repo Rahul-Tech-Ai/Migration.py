@@ -1,0 +1,66 @@
+import argparse
+import logging
+from pathlib import Path
+import pandas as pd
+
+def sanitize_name(name: str) -> str:
+    """Replaced non-alphanumeric characters with underscores for safe filenames."""
+    return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+
+def convert_excel_to_parquet(input_dir: Path, output_dir: Path):
+    """Converted all .xlsx files in input_dir to .parquet files in output_dir."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    password_protected = []
+    failed_conversions = []
+
+    for excel_path in input_dir.glob("*.xlsx"):
+        try:
+            xls = pd.ExcelFile(excel_path)
+        except ValueError:
+            logging.warning(f"Skipping password-protected file: {excel_path.name}")
+            password_protected.append(excel_path.name)
+            continue
+
+        for sheet_name in xls.sheet_names:
+            sanitized = sanitize_name(sheet_name)
+            parquet_path = output_dir / f"{excel_path.stem}_{sanitized}.parquet"
+
+            if parquet_path.exists():
+                logging.info(f"Skipping existing parquet: {parquet_path.name}")
+                continue
+
+            try:
+                df = xls.parse(sheet_name)
+                df.to_parquet(parquet_path, index=False)
+                logging.info(f"Saved {parquet_path.name}")
+            except Exception as e:
+                logging.error(f"Failed {excel_path.name}:{sheet_name} → {e}")
+                failed_conversions.append(f"{excel_path.name}:{sheet_name}")
+
+    return password_protected, failed_conversions
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert .xlsx sheets in a folder to .parquet files"
+    )
+    parser.add_argument("input_dir", type=Path, help="Folder with .xlsx files")
+    parser.add_argument("output_dir", type=Path, help="Where to save .parquet files")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG","INFO","WARNING","ERROR"],
+        help="Logging verbosity"
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(levelname)s: %(message)s"
+    )
+
+    pw_prot, failed = convert_excel_to_parquet(args.input_dir, args.output_dir)
+    logging.info(f"Password-protected skipped: {pw_prot}")
+    logging.info(f"Failed conversions: {failed}")
+
+if __name__ == "__main__":
+    main()
