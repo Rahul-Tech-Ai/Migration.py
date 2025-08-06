@@ -1,0 +1,78 @@
+import argparse
+import json
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+from snowflake.connector import connect
+
+
+def run_query_to_parquet(conn_params: dict, sql: str, out_path: Path):
+    """
+    Executes the given SQL on Snowflake and write the result to a Parquet file.
+    """
+    logging.info(f"Starting query → {out_path.name}")
+    conn = connect(**conn_params)
+    try:
+        df = pd.read_sql(sql, conn)
+        df.to_parquet(out_path, index=False)
+        logging.info(f"Finished and saved → {out_path.name} ({len(df)} rows)")
+    except Exception as e:
+        logging.error(f"Error running {out_path.name}: {e}")
+    finally:
+        conn.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run multiple Snowflake queries in parallel and save to Parquet"
+    )
+    parser.add_argument('--account',      required=True)
+    parser.add_argument('--user',         required=True)
+    parser.add_argument('--password',     required=True)
+    parser.add_argument('--database',     required=True)
+    parser.add_argument('--schema',       required=True)
+    parser.add_argument('--warehouse',    required=True)
+    parser.add_argument('--queries-file', type=Path, required=True,
+                        help='JSON file with query-name mappings')
+    parser.add_argument('--output-dir',   type=Path, required=True)
+    parser.add_argument('--threads',      type=int, default=5,
+                        help='Number of parallel threads')
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load queries
+    with open(args.queries_file) as f:
+        mappings = json.load(f)
+
+    conn_params = {
+        'account':  args.account,
+        'user':     args.user,
+        'password': args.password,
+        'database': args.database,
+        'schema':   args.schema,
+        'warehouse':args.warehouse,
+    }
+
+    # Parallel execution
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        futures = []
+        for m in mappings:
+            out_file = args.output_dir / f"{m['name']}.parquet"
+            futures.append(
+                executor.submit(
+                    run_query_to_parquet,
+                    conn_params, m['sql'], out_file
+                )
+            )
+        for fut in as_completed(futures):
+            fut.result()
+
+    logging.info("All queries completed.")
+
+
+if __name__ == '__main__':
+    main()
