@@ -1,0 +1,83 @@
+import argparse
+import json
+import logging
+import shutil
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+
+
+def load_config(path: Path) -> dict:
+    with open(path) as f:
+        return json.load(f)
+
+
+def copy_shared_files(shared_dir: Path, local_dir: Path):
+    logging.info(f"Copying from {shared_dir} to {local_dir}")
+    if not shared_dir.exists():
+        raise FileNotFoundError(f"Shared directory not found: {shared_dir}")
+    shutil.copytree(shared_dir, local_dir, dirs_exist_ok=True)
+
+
+def find_zip_files(root: Path) -> list[Path]:
+    return list(root.rglob("*.zip"))
+
+
+def process_zip(zip_path: Path, output_root: Path, delimiter: str | None):
+    logging.info(f"Processing ZIP: {zip_path.name}")
+    output_dir = output_root / zip_path.stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        for member in zf.namelist():
+            if not member.lower().endswith('.csv'):
+                continue
+            try:
+                with zf.open(member) as f:
+                    # let pandas sniff delimiter if not provided
+                    df = pd.read_csv(f, sep=delimiter) if delimiter else pd.read_csv(f)
+                    out_file = output_dir / f"{Path(member).stem}.parquet"
+                    df.to_parquet(out_file, index=False)
+                    logging.info(f"Saved {out_file.relative_to(output_root)}")
+            except Exception as e:
+                logging.error(f"Failed {member} in {zip_path.name}: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Bulk ZIP to Parquet converter"
+    )
+    parser.add_argument('--config', type=Path, required=True,
+                        help='Path to JSON config file')
+    args = parser.parse_args()
+
+    # Setup
+    config = load_config(args.config)
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+    shared_dir = Path(config['shared_dir'])
+    workspace = Path(config['local_workspace'])
+    output_root = Path(config['output_dir'])
+    threads = config.get('threads', 5)
+    delimiter = config.get('delimiter')  # e.g. ',', '\t', or None for auto
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    # Copy and discover
+    copy_shared_files(shared_dir, workspace)
+    zip_files = find_zip_files(workspace)
+
+    # Process in parallel
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = [executor.submit(process_zip, zp, output_root, delimiter)
+                   for zp in zip_files]
+        for fut in as_completed(futures):
+            fut.result()
+
+    logging.info("All ZIP files processed.")
+
+if __name__ == '__main__':
+    main()
